@@ -13,24 +13,24 @@ use std::{ops::{Deref, DerefMut}, mem::{self, ManuallyDrop}, marker::PhantomData
 /// However, users should not rely on this.
 ///
 /// For now, users should always call `release` or `into_amut` explicitly.
-pub trait Mutate<'l, A: ?Sized, B: ?Sized = A>: Sized + Deref<Target = A> + DerefMut + Drop {
-    type Ref<'m, S, T>: Mutate<'m, S, T> where S: ?Sized, T: ?Sized;
+pub trait Mutate<A: ?Sized, B: ?Sized = A>: Sized + Deref<Target = A> + DerefMut + Drop {
+    type Ref<S, T>: Mutate<S, T> where S: ?Sized, T: ?Sized;
 
     /// size_of<C>() must be smaller than max(size_of<A>(), size_of<B>())
-    fn replace_type<C>(self, val: C) -> (Self::Ref<'l, C, B>, A) where A: Sized, C: Sized;
+    fn replace_type<C>(self, val: C) -> (Self::Ref<C, B>, A) where A: Sized, C: Sized;
     fn release(self) where A: Is<B>;
 
-    fn take(self) -> (Self::Ref<'l, (), B>, A) where A: Sized {
+    fn take(self) -> (Self::Ref<(), B>, A) where A: Sized {
         self.replace_type(())
     }
 
-    fn map<C>(self, f: impl FnOnce(A) -> C) -> impl Mutate<'l, C, B> where A: Sized {
+    fn map<C>(self, f: impl FnOnce(A) -> C) -> impl Mutate<C, B> where A: Sized {
         let (r, a) = self.replace_type(());
         let c = f(a);
         r.replace_type(c).0
     }
 
-    fn into_amut(self) -> AMut<'l, impl Mutate<'l, A, B>, A, B> where A: Is<B> {
+    fn into_amut<'l>(self) -> AMut<'l, impl Mutate<A, B>, A, B> where A: Is<B>, Self: 'l {
         AMut {
             phantom_a: PhantomData,
             phantom_b: PhantomData,
@@ -42,19 +42,19 @@ pub trait Mutate<'l, A: ?Sized, B: ?Sized = A>: Sized + Deref<Target = A> + Dere
 ///
 /// The trait of `Mutate` instances that can safely be allowed
 /// to drop automatically.
-pub trait AMutate<'l, A: ?Sized, B: ?Sized = A>: Mutate<'l, A, B> {}
+pub trait AMutate<A: ?Sized, B: ?Sized = A>: Mutate<A, B> {}
 
 /// Short for "Affine Mut".
 ///
 /// It requires a Mutable<A, B> instance where A: Is<B>,
 /// but in exchange automatically calls release upon drop.
-pub struct AMut<'l, M, A, B = A> where M: Mutate<'l, A, B>, A: Is<B> + ?Sized, B: ?Sized {
+pub struct AMut<'l, M, A, B = A> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
     phantom_a: PhantomData<&'l mut A>,
     phantom_b: PhantomData<&'l mut B>,
     mutate: ManuallyDrop<M>
 }
 
-impl<'l, A, B, M> Drop for AMut<'l, M, A, B> where M: Mutate<'l, A, B>, A: Is<B> + ?Sized, B: ?Sized {
+impl<'l, A, B, M> Drop for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
     fn drop(&mut self) {
         unsafe {
             let m = ManuallyDrop::take(&mut self.mutate);
@@ -63,7 +63,7 @@ impl<'l, A, B, M> Drop for AMut<'l, M, A, B> where M: Mutate<'l, A, B>, A: Is<B>
     }
 }
 
-impl<'l, A, B, M> Deref for AMut<'l, M, A, B> where M: Mutate<'l, A, B>, A: Is<B> + ?Sized, B: ?Sized {
+impl<'l, A, B, M> Deref for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
     type Target = M::Target;
 
     fn deref(&self) -> &A {
@@ -71,16 +71,16 @@ impl<'l, A, B, M> Deref for AMut<'l, M, A, B> where M: Mutate<'l, A, B>, A: Is<B
     }
 }
 
-impl<'l, A, B, M> DerefMut for AMut<'l, M, A, B> where M: Mutate<'l, A, B>, A: Is<B> + ?Sized, B: ?Sized {
+impl<'l, A, B, M> DerefMut for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
     fn deref_mut(&mut self) -> &mut A {
         &mut self.mutate
     }
 }
 
-impl<'l, A, B, M> Mutate<'l, A, B> for AMut<'l, M, A, B> where M: Mutate<'l, A, B>, A: Is<B> + ?Sized, B: ?Sized {
-    type Ref<'m, S: ?Sized, T: ?Sized> = M::Ref<'m, S, T>;
+impl<'l, A, B, M> Mutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
+    type Ref<S: ?Sized, T: ?Sized> = M::Ref<S, T>;
 
-    fn replace_type<C>(mut self, val: C) -> (M::Ref<'l, C, B>, A) where A: Sized, C: Sized {
+    fn replace_type<C>(mut self, val: C) -> (M::Ref<C, B>, A) where A: Sized, C: Sized {
         let result = unsafe {
             ManuallyDrop::take(&mut self.mutate).replace_type(val)
         };
@@ -92,12 +92,12 @@ impl<'l, A, B, M> Mutate<'l, A, B> for AMut<'l, M, A, B> where M: Mutate<'l, A, 
         mem::drop(self)
     }
 
-    fn into_amut(self) -> AMut<'l, impl Mutate<'l, A, B>, A, B> where A: Is<B> {
+    fn into_amut<'m>(self) -> AMut<'m, impl Mutate<A, B>, A, B> where A: Is<B>, 'l: 'm {
         self
     }
 }
 
-impl<'l, A, B, M> AMutate<'l, A, B> for AMut<'l, M, A, B> where M: Mutate<'l, A, B>, A: Is<B> + ?Sized, B: ?Sized {}
+impl<'l, A, B, M> AMutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {}
 
 
 /// Trait that determines whether a type is itself.

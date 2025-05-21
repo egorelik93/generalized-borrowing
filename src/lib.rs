@@ -16,7 +16,7 @@ union Typestate<A, B> {
 mod tests {
     use super::*;
 
-    fn it_compiles<'l, A>(a : impl AMutate<'l, A>) {
+    fn it_compiles<A>(a : impl AMutate<A>) {
         a.release();
     }
 }
