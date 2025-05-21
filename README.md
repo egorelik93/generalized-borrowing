@@ -40,7 +40,7 @@ replace: { write: &mut A/B, val: B } -> A where 'write: 'val;
 
 `&out B` is then just a synonym for `&mut ()/B`. Similarly, we can have an `&in A` that is synonymous
 with `&mut A/()`.
-Because we can specify cleanup code, we can do things like borrow `T` or `Box<T>` as `&in A`.
+Because we can specify cleanup code, we can do things like borrow `A` or `Box<A>` as `&in A`.
 However, this cleanup code also means that `&mut A/A` is not quite the same as Rust's `&mut A`.
 
 This is heavily inspired by typestate and session types. The innovation is that combining them with a lifetime
