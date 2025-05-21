@@ -42,6 +42,8 @@ replace: { write: &mut A/B, val: B } -> A where 'write: 'val;
 with `&mut A/()`.
 Because we can specify cleanup code, we can do things like borrow `A` or `Box<A>` as `&in A`.
 However, this cleanup code also means that `&mut A/A` is not quite the same as Rust's `&mut A`.
+In the original formulation, any `&mut A/B` is equivalent to
+`{ input: &'output in A, output: &out B }'`. This is not possible in Rust, however.
 
 This is heavily inspired by typestate and session types. The innovation is that combining them with a lifetime
 system allows extending them to cover reference/pointer types on the stack, as well as other effects.
