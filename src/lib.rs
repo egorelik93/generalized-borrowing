@@ -1,14 +1,22 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
+#![doc = include_str!("../README.md")]
+
+use std::mem::ManuallyDrop;
+
+pub mod mutate;
+
+pub use mutate::{Mutate, AMutate, AMut};
+
+union Typestate<A, B> {
+    current: ManuallyDrop<A>,
+    target: ManuallyDrop<B>
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn it_compiles<'l, A>(a : impl AMutate<'l, A>) {
+        a.release();
     }
 }
