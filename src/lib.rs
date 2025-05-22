@@ -3,8 +3,12 @@
 use std::mem::ManuallyDrop;
 
 pub mod mutate;
+pub mod mutref;
+mod pinned;
 
 pub use mutate::{Mutate, AMutate, AMut};
+pub use mutref::{Mut, In, Out, MutateCell};
+pub use pinned::PinnedCell;
 
 union Typestate<A, B> {
     current: ManuallyDrop<A>,

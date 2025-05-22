@@ -23,30 +23,30 @@ pub trait Mutate<A, B = A>: Sized + Deref<Target = A> + DerefMut + Drop {
     /// Like take, but it leaves knowledge of the actual size.
     ///
     /// The resulting MaybeUninit<A> is guaranteed to be uninitialized.
-    fn take_and_uninit(self) -> (impl Mutate<MaybeUninit<A>, B>, A);
+    fn take_and_uninit<'l>(self) -> (impl Mutate<MaybeUninit<A>, B> + 'l, A) where Self: 'l;
 
     /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
     ///
     /// `A` must be dropped in place.
-    fn set_pin<C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B>>;
+    fn set_pin<'l, C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B> + 'l> where Self: 'l, C: 'l;
 
     fn release(self) where A: Is<B>;
 
 
     /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
-    fn set<C>(self, val: C) -> impl Mutate<C, B> {
+    fn set<'l, C>(self, val: C) -> impl Mutate<C, B> + 'l where Self: 'l, C: 'l {
         let p = self.into_pin();
         let p = Self::set_pin(p, val);
         unsafe { Pin::into_inner_unchecked(p) }
     }
 
     /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
-    fn replace<C>(self, val: C) -> (impl Mutate<C, B>, A) {
+    fn replace<'l, C>(self, val: C) -> (impl Mutate<C, B> + 'l, A) where Self: 'l, C: 'l {
         let (m, a) = self.take_and_uninit();
         (m.set(val), a)
     }
 
-    fn take(self) -> (impl Mutate<(), B>, A) {
+    fn take<'l>(self) -> (impl Mutate<(), B> + 'l, A) where Self: 'l {
         self.replace(())
     }
 
@@ -67,7 +67,7 @@ pub trait Mutate<A, B = A>: Sized + Deref<Target = A> + DerefMut + Drop {
         unsafe { Pin::into_inner_unchecked(m).release() }
     }
 
-    fn map<C>(self, f: impl FnOnce(A) -> C) -> impl Mutate<C, B> {
+    fn map<'l, C>(self, f: impl FnOnce(A) -> C) -> impl Mutate<C, B> + 'l where Self: 'l, C: 'l {
         let (r, a) = self.replace(());
         let c = f(a);
         r.replace(c).0
@@ -121,7 +121,7 @@ impl<'l, A, B, M> DerefMut for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: 
 }
 
 impl<'l, A, B, M> Mutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> {
-    fn take_and_uninit(mut self) -> (impl Mutate<MaybeUninit<A>, B>, A) {
+    fn take_and_uninit<'m>(mut self) -> (impl Mutate<MaybeUninit<A>, B> + 'm, A) where 'l: 'm {
         let result = unsafe {
             ManuallyDrop::take(&mut self.mutate).take_and_uninit()
         };
@@ -129,7 +129,7 @@ impl<'l, A, B, M> Mutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l,
         result
     }
 
-    fn set_pin<C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B>> {
+    fn set_pin<'m, C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B> + 'm> where 'l: 'm, C: 'm {
         unsafe {
             let mut a = Pin::into_inner_unchecked(pin);
             let m = Pin::new_unchecked(ManuallyDrop::take(&mut a.mutate));
@@ -187,5 +187,5 @@ impl<A: ?Sized> Is<A> for A {
 impl<A: ?Sized> private::Private<A> for A {}
 
 mod private {
-    pub trait Private<T: ?Sized> {}
+    pub(crate) trait Private<T: ?Sized> {}
 }
