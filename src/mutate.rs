@@ -48,6 +48,7 @@ pub trait Mutate<A, B = A>: Sized + Deref<Target = A> + DerefMut + Drop {
         self.replace(())
     }
 
+    /// This method will eventually be required for Unsized B.
     fn set_and_release(self, val: B) -> () {
         let m = self.set(val);
         m.release();
