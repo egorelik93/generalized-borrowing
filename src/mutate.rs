@@ -26,6 +26,8 @@ pub trait Mutate<A, B = A>: Sized + Deref<Target = A> + DerefMut + Drop {
     fn take_and_uninit(self) -> (impl Mutate<MaybeUninit<A>, B>, A);
 
     /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
+    ///
+    /// `A` must be dropped in place.
     fn set_pin<C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B>>;
 
     fn release(self) where A: Is<B>;
