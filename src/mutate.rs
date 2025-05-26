@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem::{self, ManuallyDrop, MaybeUninit}, ops::{Deref, DerefMut}, pin::Pin};
+use std::{marker::PhantomData, mem::{self, ManuallyDrop, MaybeUninit}, ops::{Deref, DerefMut}, pin::Pin, ptr};
 
 /// Trait representing references that currently contain
 /// one type but expect another before being dropped.
@@ -17,63 +17,113 @@ use std::{marker::PhantomData, mem::{self, ManuallyDrop, MaybeUninit}, ops::{Der
 /// `A` must be pinned in memory. For that reason, the `into_pin` method
 /// must be valid.
 ///
-/// Unsized A and B will eventually be supported in combination with unsized rvalues.
-pub trait Mutate<A, B = A>: Sized + Deref<Target = A> + DerefMut + Drop {
+/// While the original formulation allowed `B` to be unsized, it did not have coercions from `&mut Sized` to `&mut DST`.
+/// Since Rust does have such coercions, we have the following mutually-exclusive options:
+/// 1. (Eventually) allow unsized coercions in `A` and `B` simultaneously. This requires us to remove the ability
+///    to directly pass an unsized `B` to the continuation/cleanup code, as having both is unsound.
+/// 2. Disallow such coercions in `Mutate`, requiring users to borrow as `&mut` if they want this. This allows
+///    us to keep the ability to directly pass in `B`, also keeping the semantic that `Mutate<(),B>` is like `FnOnce(B) -> ()`.
+///
+/// The choice we make for now is actually to not have either.
+/// We have a number of reasons for this:
+/// - Unsized coercions are currently locked to nightly anyway.
+/// - Unsized coercions are very much covariant, but `B` here is really a contravariant parameter.
+/// - The only useful combinations for unsized `B` are `&mut B/B` and `&mut ()/B`.
+///   All methods on `Mutate` require the top to be `Sized` so the former
+///   is basically limited in functionality to `Deref` and `DerefMut`. One may as well directly
+///   borrow as Rust's `&mut B` at the time of coercion; cleanup code will still get called once the borrow
+///   finishes.
+///
+/// Users who want (2) for unsized `B` should use `InOut<A, B>` instead.
+pub trait Mutate<A, B = A>: Deref<Target = A> + DerefMut + Drop where A: ?Sized, B: ?Sized {
+    type Ref<'l, S>: Mutate<S, B, Err = Self::Err> where Self: 'l, S: 'l;
+    type Err;
+
+    /// Writes without reading or dropping the current value.
+    ///
+    /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`.
+    /// This is technically safe for users to call, but implementors must be extremely careful
+    /// to satisfy these requirements.
+    /// The expectation is that a user or library code may unsafely drop or take the value first
+    /// through a reference, and then call this method to set a new value.
+    fn write<'l, C>(self, src: C) -> Self::Ref<'l, C> where Self: 'l;
+
+    fn release(self) -> Result<(), Self::Err> where A: Is<B>;
+
+
+    fn take<'l>(self) -> (Self::Ref<'l, ()>, A) where Self: 'l, A: Sized, Self: Sized {
+        let a = unsafe { ptr::read(&*self) };
+        (self.write(()), a)
+    }
 
     /// Like take, but it leaves knowledge of the actual size.
     ///
     /// The resulting MaybeUninit<A> is guaranteed to be uninitialized.
-    fn take_and_uninit<'l>(self) -> (impl Mutate<MaybeUninit<A>, B> + 'l, A) where Self: 'l;
+    fn take_and_uninit<'l>(self) -> (Self::Ref<'l, MaybeUninit<A>>, A) where Self: 'l, A: Sized, Self: Sized {
+        let a = unsafe { ptr::read(&*self) };
+        (self.write(MaybeUninit::uninit()), a)
+    }
+
+    /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
+    fn replace<'l, C>(self, val: C) -> (Self::Ref<'l, C>, A) where Self: 'l, C: 'l, A: Sized, Self: Sized {
+        let a = unsafe { ptr::read(&*self) };
+        (self.write(val), a)
+    }
 
     /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
     ///
-    /// `A` must be dropped in place.
-    fn set_pin<'l, C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B> + 'l> where Self: 'l, C: 'l;
-
-    fn release(self) where A: Is<B>;
-
-
-    /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
-    fn set<'l, C>(self, val: C) -> impl Mutate<C, B> + 'l where Self: 'l, C: 'l {
-        let p = self.into_pin();
-        let p = Self::set_pin(p, val);
-        unsafe { Pin::into_inner_unchecked(p) }
+    /// If `A` is unsized, then `size_of::<C>()` must be smaller than `size_of::<B>()`.
+    fn set<'l, C>(mut self, val: C) -> Self::Ref<'l, C> where Self: 'l, Self: Sized {
+        unsafe { ptr::drop_in_place(&mut *self); }
+        self.write(val)
     }
 
-    /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
-    fn replace<'l, C>(self, val: C) -> (impl Mutate<C, B> + 'l, A) where Self: 'l, C: 'l {
-        let (m, a) = self.take_and_uninit();
-        (m.set(val), a)
+    fn map<'l, C>(self, f: impl FnOnce(A) -> C) -> Self::Ref<'l, C> where Self: 'l, C: 'l, A: Sized, Self: Sized {
+        let a = unsafe { ptr::read(&*self) };
+        let c = f(a);
+        self.write(c)
     }
 
-    fn take<'l>(self) -> (impl Mutate<(), B> + 'l, A) where Self: 'l {
-        self.replace(())
-    }
-
-    /// This method will eventually be required for Unsized B.
-    fn set_and_release(self, val: B) -> () {
+    fn set_and_release(self, val: B) -> Result<(), Self::Err> where B: Sized, Self: Sized {
         let m = self.set(val);
-        m.release();
+        m.release()
     }
 
-    fn into_pin(self) -> Pin<Self> {
+    fn into_pin(self) -> Pin<Self> where Self: Sized {
         unsafe {
             Pin::new_unchecked(self)
         }
     }
 
-    fn set_and_release_pin(pin: Pin<Self>, val: B) -> () {
+    /// Writes without reading or dropping the current value.
+    ///
+    /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`.
+    fn write_pin<'l, C>(pin: Pin<Self>, src: C) -> Pin<Self::Ref<'l, C>> where Self: Sized + 'l {
+        unsafe {
+            let m = Pin::into_inner_unchecked(pin);
+            let m = m.write(src);
+            Pin::new_unchecked(m)
+        }
+    }
+
+    /// `size_of::<C>()` must be smaller than `max(size_of::<A>(), size_of::<B>())`
+    ///
+    /// `A` must be dropped in place.
+    /// If `A` is unsized, then `size_of::<C>()` must be smaller than `size_of::<B>()`.
+    fn set_pin<'l, C>(pin: Pin<Self>, val: C) -> Pin<Self::Ref<'l, C>> where Self: Sized + 'l {
+        unsafe {
+            let m = Pin::into_inner_unchecked(pin);
+            let m = m.set(val);
+            Pin::new_unchecked(m)
+        }
+    }
+
+    fn set_and_release_pin(pin: Pin<Self>, val: B) -> Result<(), Self::Err> where Self: Sized, B: Sized {
         let m = Self::set_pin(pin, val);
         unsafe { Pin::into_inner_unchecked(m).release() }
     }
 
-    fn map<'l, C>(self, f: impl FnOnce(A) -> C) -> impl Mutate<C, B> + 'l where Self: 'l, C: 'l {
-        let (r, a) = self.replace(());
-        let c = f(a);
-        r.replace(c).0
-    }
-
-    fn into_amut<'l>(self) -> AMut<'l, impl Mutate<A, B>, A, B> where A: Is<B>, Self: 'l {
+    fn into_amut<'l>(self) -> AMut<'l, impl Mutate<A, B, Err = Self::Err>, A, B> where A: Is<B> + Sized, Self: Sized + 'l {
         AMut {
             phantom_a: PhantomData,
             phantom_b: PhantomData,
@@ -81,32 +131,33 @@ pub trait Mutate<A, B = A>: Sized + Deref<Target = A> + DerefMut + Drop {
     }
 }
 
+
 /// Short for "Affine Mutate"
 ///
 /// The trait of `Mutate` instances that can safely be allowed
 /// to drop automatically.
-pub trait AMutate<A, B = A>: Mutate<A, B> where A: Is<B> {}
+pub trait AMutate<A: ?Sized, B: ?Sized = A>: Mutate<A, B> where A: Is<B> {}
 
 /// Short for "Affine Mut".
 ///
 /// It requires a Mutable<A, B> instance where A: Is<B>,
 /// but in exchange automatically calls release upon drop.
-pub struct AMut<'l, M, A, B = A> where M: Mutate<A, B> + 'l, A: Is<B> {
+pub struct AMut<'l, M, A, B = A> where M: Mutate<A, B> + 'l, A: Is<B>, A: ?Sized, B: ?Sized {
     phantom_a: PhantomData<&'l mut A>,
     phantom_b: PhantomData<&'l mut B>,
     mutate: ManuallyDrop<M>
 }
 
-impl<'l, A, B, M> Drop for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> {
+impl<'l, A, B, M> Drop for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized{
     fn drop(&mut self) {
         unsafe {
             let m = ManuallyDrop::take(&mut self.mutate);
-            m.release()
+            m.release();
         }
     }
 }
 
-impl<'l, A, B, M> Deref for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> {
+impl<'l, A, B, M> Deref for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
     type Target = M::Target;
 
     fn deref(&self) -> &A {
@@ -114,41 +165,38 @@ impl<'l, A, B, M> Deref for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<
     }
 }
 
-impl<'l, A, B, M> DerefMut for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> {
+impl<'l, A, B, M> DerefMut for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
     fn deref_mut(&mut self) -> &mut A {
         &mut self.mutate
     }
 }
 
-impl<'l, A, B, M> Mutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> {
-    fn take_and_uninit<'m>(mut self) -> (impl Mutate<MaybeUninit<A>, B> + 'm, A) where 'l: 'm {
+impl<'l, A, B, M> Mutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> + ?Sized, B: ?Sized {
+    type Ref<'m, C> = M::Ref<'m, C> where Self: 'm, C: 'm;
+    type Err = M::Err;
+
+    fn write<'m, C>(mut self, src: C) -> Self::Ref<'m, C> where Self: 'm {
         let result = unsafe {
-            ManuallyDrop::take(&mut self.mutate).take_and_uninit()
+            ManuallyDrop::take(&mut self.mutate).write(src)
         };
         mem::forget(self);
         result
     }
 
-    fn set_pin<'m, C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B> + 'm> where 'l: 'm, C: 'm {
+    fn release(mut self) -> Result<(), M::Err> where A: Is<B> {
         unsafe {
-            let mut a = Pin::into_inner_unchecked(pin);
-            let m = Pin::new_unchecked(ManuallyDrop::take(&mut a.mutate));
-            let result = M::set_pin(m, val);
-            mem::forget(a);
-            result
+            let m = ManuallyDrop::take(&mut self.mutate);
+            m.release()
         }
     }
 
-    fn release(self) where A: Is<B> {
-        mem::drop(self)
-    }
-
-    fn into_amut<'m>(self) -> AMut<'m, impl Mutate<A, B>, A, B> where A: Is<B>, 'l: 'm {
+    fn into_amut<'m>(self) -> AMut<'m, impl Mutate<A, B, Err = Self::Err>, A, B> where A: Is<B>, 'l: 'm {
         self
     }
 }
 
 impl<'l, A, B, M> AMutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B> {}
+
 
 
 /// Trait that determines whether a type is itself.
@@ -160,6 +208,9 @@ pub trait Is<T: ?Sized>: private::Private<T> {
     fn id_mut(&mut self) -> &mut T;
     fn id_ptr(ptr: *const Self) -> *const T;
     fn id_ptr_mut(ptr: *mut Self) -> *mut T;
+
+    fn id_mutate_top<X>(m: impl Mutate<Self, X>) -> impl Mutate<T, X> where Self: Sized, T: Sized;
+    fn id_mutate_bottom<X>(m: impl Mutate<X, Self>) -> impl Mutate<X, T> where Self: Sized, T: Sized;
 }
 
 impl<A: ?Sized> Is<A> for A {
@@ -181,6 +232,14 @@ impl<A: ?Sized> Is<A> for A {
 
     fn id_ptr_mut(ptr: *mut Self) -> *mut A {
         ptr
+    }
+
+    fn id_mutate_top<X>(m: impl Mutate<Self, X>) -> impl Mutate<A, X> {
+        m
+    }
+
+    fn id_mutate_bottom<X>(m: impl Mutate<X, Self>) -> impl Mutate<X, A> {
+        m
     }
 }
 

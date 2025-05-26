@@ -1,12 +1,19 @@
 #![cfg_attr(not(doctest), doc = include_str!("../README.md"))]
 
+#![cfg_attr(feature = "nightly", feature(allocator_api))]
+#![cfg_attr(feature = "nightly", feature(unsized_locals))]
+#![cfg_attr(feature = "nightly", feature(unsized_fn_params))]
+#![cfg_attr(feature = "nightly", feature(specialization))]
+
 use std::mem::ManuallyDrop;
 
 pub mod mutate;
 pub mod mutref;
 mod pinned;
+pub mod inout;
 
-pub use mutate::{Mutate, AMutate, AMut};
+pub use mutate::{Mutate, AMutate, AMut, Is};
+pub use inout::{Input, Output};
 pub use mutref::{Mut, In, Out, MutateCell};
 pub use pinned::PinnedCell;
 

@@ -1,10 +1,8 @@
-use std::{any::Any,
-          cmp,
+use std::{convert::Infallible,
           marker::PhantomData,
           mem::{self, ManuallyDrop, MaybeUninit},
           ops::{Deref, DerefMut},
-          panic::{catch_unwind, UnwindSafe},
-          pin::Pin,
+          panic::UnwindSafe,
           ptr};
 
 use crate::Typestate;
@@ -19,15 +17,14 @@ const fn size_of_union<A, B>() -> usize {
 
 pub struct Mut<'a, A, B = A> {
     val: &'a mut A,
-    //write: OutFn<'a, B>,
-    write: &'a mut dyn OutFn<B>
+    write: &'a mut dyn InternalOutFn<B>
 }
 
 impl<'l, A, B> Mut<'l, A, B> {
-    pub(crate) unsafe fn from_parts<F>(val: &'l mut Typestate<A, B>, write: &'l mut F) -> Self where F: OutFn<B> {
+    pub(crate) unsafe fn from_parts<F>(val: &'l mut Typestate<A, B>, write: &'l mut F) -> Self where F: InternalOutFn<B> {
         Mut {
             val: unsafe { mem::transmute(val) },
-            write: write as &mut dyn OutFn<B>
+            write: write as &mut dyn InternalOutFn<B>
         }
     }
 }
@@ -61,31 +58,20 @@ impl<A, B> DerefMut for Mut<'_, A, B> {
 
 
 impl<'l, A, B> Mutate<A, B> for Mut<'l, A, B> {
+    type Ref<'m, S> = Mut<'m, S, B> where Self: 'm, S: 'm;
+    type Err = Infallible;
 
-    fn take_and_uninit<'m>(self) -> (impl Mutate<MaybeUninit<A>, B> + 'm, A) where 'l: 'm {
-        let transmuted: Mut<MaybeUninit<A>, B> = unsafe { mem::transmute(self) };
-        let a = mem::replace(transmuted.val, MaybeUninit::uninit());
-        unsafe {
-            (transmuted, a.assume_init())
-        }
-    }
-
-    fn set_pin<'m, C>(pin: Pin<Self>, val: C) -> Pin<impl Mutate<C, B> + 'm> where 'l: 'm, C: 'm {
+    fn write<'m, C>(self, src: C) -> Self::Ref<'m, C> where Self: 'm {
         const {
             assert!(mem::size_of::<C>() <= size_of_union::<A, B>());
         }
 
-        unsafe {
-            let mut m = Pin::into_inner_unchecked(pin);
-            ptr::drop_in_place(&mut m.val);
-
-            mem::replace(mem::transmute(&mut m.val), MaybeUninit::new(val));
-            let transmuted: Mut<'m, C, B> = mem::transmute(m);
-            Pin::new_unchecked(transmuted)
-        }
+        let transmuted: Mut<MaybeUninit<C>, B> = unsafe { mem::transmute(self) };
+        mem::replace(transmuted.val, MaybeUninit::new(src));
+        unsafe { mem::transmute(transmuted) }
     }
 
-    fn release(mut self) where A: Is<B> {
+    fn release(mut self) -> Result<(), Infallible> where A: Is<B> {
         unsafe {
             let a = &mut *self.val;
             let b = a.id_mut();
@@ -93,6 +79,7 @@ impl<'l, A, B> Mutate<A, B> for Mut<'l, A, B> {
         }
 
         mem::forget(self);
+        Ok(())
     }
 }
 
@@ -101,7 +88,7 @@ impl<A, B> UnwindSafe for Mut<'_, A, B> {}
 
 /// An In<A> is like a Box, but isn't necessarily stored
 /// on the heap.
-pub type In<'a, A> = Mut<'a, A, ()>;
+pub type In<'a, A> = crate::inout::DisposableInput<Mut<'a, A, ()>, A>;
 
 pub type Out<'a, A> = Mut<'a, (), A>;
 
@@ -128,7 +115,7 @@ impl<A, B, M> MutateCell<M, A, B> where M: Mutate<A, B> {
     }
 
     pub fn borrow_mut(&mut self) -> Mut<A, B> {
-        let closure = &mut self.inner as &mut dyn OutFn<B>;
+        let closure = &mut self.inner as &mut dyn InternalOutFn<B>;
         let a = unsafe { &mut *self.val.assume_init_mut().current };
 
         Mut {
@@ -151,11 +138,11 @@ struct MutateCellInner<M, A, B> where M: Mutate<A, B> {
     phantom_b: PhantomData<*mut B>
 }
 
-pub(crate) trait OutFn<B> {
+pub(crate) trait InternalOutFn<B> {
     fn write<'m>(&mut self, input: OutFnInput<'m, B>);
 }
 
-impl<A, B, M> OutFn<B> for MutateCellInner<M, A, B> where M: Mutate<A, B> {
+impl<A, B, M> InternalOutFn<B> for MutateCellInner<M, A, B> where M: Mutate<A, B> {
     fn write<'m>(&mut self, input: OutFnInput<'m, B>) {
         self.fill(input);
     }

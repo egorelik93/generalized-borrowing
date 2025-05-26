@@ -1,6 +1,6 @@
 use std::{mem::{ManuallyDrop, MaybeUninit}, ptr};
 
-use crate::{mutref::{OutFn, OutFnInput}, Mut, Typestate};
+use crate::{mutref::{InternalOutFn, OutFnInput}, Mut, Typestate};
 
 pub struct PinnedCell<A, B> {
     val: MaybeUninit<Typestate<A, B>>,
@@ -9,7 +9,7 @@ pub struct PinnedCell<A, B> {
 
 struct PinnedCellInner { written: bool }
 
-impl<B> OutFn<B> for PinnedCellInner {
+impl<B> InternalOutFn<B> for PinnedCellInner {
     fn write<'m>(&mut self, input: OutFnInput<'m, B>) {
         self.written = match input { OutFnInput::Write(_) => true, OutFnInput::Unfilled => false };
     }
@@ -23,6 +23,8 @@ impl<A, B> PinnedCell<A, B> {
     }
 
     pub fn borrow_mut(&mut self) -> Mut<A, B> {
+        assert!(!self.inner.written, "Cell was already borrowed");
+
         unsafe {
             Mut::from_parts(self.val.assume_init_mut(), &mut self.inner)
         }
