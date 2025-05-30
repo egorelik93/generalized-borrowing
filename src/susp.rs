@@ -6,15 +6,13 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use paste::paste;
-
 use crate::{
     inout::InBox,
     mutref::{InternalOutFn, OutFnInput},
     Mut, Typestate,
 };
 
-pub struct SuspCell<A, B, S, T = B, F = ()> {
+pub struct SuspCell<S, B, A, T = B, F = ()> {
     val: MaybeUninit<Typestate<A, B>>,
     inner: SuspCellShared<S, T, B, F>,
 }
@@ -29,68 +27,13 @@ pub type SuspCellRef<'l, A, B> = Mut<'l, A, B>;
 
 pub struct SuspCellTransformShared<'l, S, T, B, F>(UnsafeCell<SuspCellTransform<'l, S, T, B, F>>);
 
-#[macro_export]
-macro_rules! borrow_and_transform {
-    (mut $label:ident = $val:expr; defer $body:expr) => {
-        paste! {
-            let $label = SuspCell::new_with(val, |$label| $body);
-            let ([<__transformer_ $label>], borrow) = __cell_$label.borrow_and_transform();
-            borrow
-        }
-    };
-
-    (mut $label:ident = $val:expr) => {
-        paste! {{
-            let $label = SuspCell::new($val);
-            let ([<__transformer_ $label>], borrow) = $label.borrow_and_transform();
-            borrow
-        }}
-    };
-}
-
-#[macro_export]
-macro_rules! let_borrow_and_transform {
-    ($borrow:ident = &mut ($cell:ident = $val:expr);) => {
-        paste! {
-            let mut $cell = SuspCell::new($val);
-            let (mut [<__transformer_ $cell>], mut $borrow) = $cell.borrow_and_transform();
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! into_inner {
-    ($cell:ident) => {
-        paste! {{
-            [<__transformer_ $cell>].release();
-            $cell.into_inner()
-        }}
-    };
-}
-
-#[macro_export]
-macro_rules! release {
-    ($cell:ident) => {
-        paste! {
-            [<__transformer_ $cell>].release();
-            let $cell = $cell.into_inner();
-        }
-    };
-}
-
+/// Will most likely need to be inside a block,
+/// in order to force the pin to be dropped before SuspCell is reclaimed.
 #[macro_export]
 macro_rules! defer {
-    ($cell:ident: $t:ty = $body:expr;) => {
-        paste! {
-            let [<__transformer_ $cell>] = continue_with!([<__transformer_ $cell>], |$cell: $t| $body);
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! continue_with {
-    ($transformer:expr, $func:expr) => {
-        std::pin::pin!($transformer.transform($func)).continue_with()
+    ($transformer:ident $(: $type:ty)? = $body:expr;) => {
+        let p = core::pin::pin!($transformer.transform$(::<$type, _>)?(|$transformer| $body));
+        let $transformer = p.continue_with();
     };
 }
 
@@ -169,7 +112,7 @@ trait DynTypedSuspCellTransform<'l, S, T, B, F>: DynSuspCellTransform<'l, S> {
     fn f_mut(&mut self) -> &mut Option<F>;
 }
 
-impl<S, A, B> SuspCell<A, B, S> {
+impl<S, A, B> SuspCell<S, B, A> {
     pub fn new(a: A) -> Self {
         SuspCell {
             val: MaybeUninit::new(Typestate {
@@ -183,7 +126,7 @@ impl<S, A, B> SuspCell<A, B, S> {
     }
 }
 
-impl<F, S, T, A, B> SuspCell<A, B, S, T, F>
+impl<F, S, T, A, B> SuspCell<S, B, A, T, F>
 where
     F: FnOnce(B) -> T,
 {
@@ -201,19 +144,14 @@ where
 }
 
 #[allow(private_bounds)]
-impl<F, S, A, B> SuspCell<A, B, S, S, F>
+impl<F, S, A, B> SuspCell<S, B, A, S, F>
 where
     F: Continuation<B, S>,
 {
     pub fn borrow_mut<'l>(&'l mut self) -> SuspCellRef<'l, A, B> {
-        assert!(
-            !self
-                .inner
-                .0
-                .get_mut()
-                .target
-                .as_ref()
-                .is_err_and(|e| *e == State::Unfilled),
+        assert_eq!(
+            self.inner.0.get_mut().target.as_ref().err(),
+            Some(&State::Unfilled),
             "Cell was already borrowed"
         );
 
@@ -225,7 +163,7 @@ where
 }
 
 #[allow(private_bounds)]
-impl<F, S, T, A, B> SuspCell<A, B, S, T, F>
+impl<F, S, T, A, B> SuspCell<S, B, A, T, F>
 where
     F: Continuation<B, T>,
 {
@@ -235,14 +173,9 @@ where
         SuspCellTransformer<'l, 'l, S, T, B, F>,
         SuspCellRef<'l, A, B>,
     ) {
-        assert!(
-            !self
-                .inner
-                .0
-                .get_mut()
-                .target
-                .as_ref()
-                .is_err_and(|e| *e == State::Unfilled),
+        assert_eq!(
+            self.inner.0.get_mut().target.as_ref().err(),
+            Some(&State::Unfilled),
             "Cell was already borrowed"
         );
 
@@ -271,16 +204,11 @@ where
     }
 }
 
-impl<S, T, A, B, F> Drop for SuspCell<A, B, S, T, F> {
+impl<S, T, A, B, F> Drop for SuspCell<S, B, A, T, F> {
     fn drop(&mut self) {
-        assert!(
-            {
-                let target = &self.inner.0.get_mut().target;
-                match target {
-                    Err(State::Unfilled) => false,
-                    _ => true,
-                }
-            },
+        assert_ne!(
+            self.inner.0.get_mut().target.as_ref().err(),
+            Some(&State::Unfilled),
             "Mut was not written to or transformed as specified"
         );
     }
@@ -289,7 +217,7 @@ impl<S, T, A, B, F> Drop for SuspCell<A, B, S, T, F> {
 #[allow(private_bounds)]
 impl<'m, 'l, S, B, F> SuspCellTransformer<'m, 'l, S, S, B, F>
 where
-    F: Continuation<S, S> + 'l,
+    F: Continuation<B, S> + 'l,
     S: 'l,
     B: 'l,
 {
@@ -801,55 +729,98 @@ fn take_result<T>(result: &mut Result<T, State>) -> Option<T> {
     }
 }
 
+#[cfg(test)]
 mod tests {
+    use std::pin;
+
     use crate::Mutate;
 
     use super::SuspCell;
 
     #[test]
-    fn simple() {
-        let mut cell: SuspCell<i32, i32, i32> = SuspCell::new(5);
+    fn test_simple() {
+        let mut cell = SuspCell::new(5);
 
         let mut b = cell.borrow_mut();
         *b = 6;
         b.release();
 
         let result = cell.into_inner();
-        assert!(result == 6);
+        assert_eq!(result, 6);
     }
 
     #[test]
-    fn test_macros() {
-        use paste::paste;
-
-        let_borrow_and_transform!{ b = &mut (cell = 23); }
-
-        //let b = borrow_and_transform! { mut cell = 23 };
-        defer! { cell: i32 = cell * 2; }
-        //let x = into_inner!(cell);
-        release!(cell);
-    }
-
-    #[test]
-    fn test_macros_expanded() {
-        let mut cell = SuspCell::new(23);
-        let (__transformer_cell, b) = cell.borrow_and_transform();
-        let __transformer_cell =
-            std::pin::pin!(__transformer_cell.transform(|cell:i32| cell * 2))
-        .continue_with();
-
+    fn test_inference() {
+        let mut cell = SuspCell::new(5);
+        let mut b = cell.borrow_mut();
+        let (mut b, _) = b.replace(true);
+        *b = false;
         b.release();
-        let x = {
-            __transformer_cell.release();
-            cell.into_inner()
-        };
+
+        assert_eq!(cell.into_inner(), false);
     }
 
     #[test]
-    fn regular_borrow() {
-        let mut cell = 5;
-        let b = &mut cell;
-        *b = 6;
-        assert!(cell == 6);
+    fn test_transform_inference() {
+        let mut cell = SuspCell::new(5);
+        {
+            let (mut t, mut b) = cell.borrow_and_transform();
+            let x = *b;
+            let (mut b, _) = b.replace(x as f64);
+            b.release();
+
+            defer! { t: bool = t == 5.0; }
+            t.release();
+        }
+        assert_eq!(cell.into_inner(), true);
+    }
+
+    #[test]
+    fn test_transform_explicit_pin() {
+        let mut cell = SuspCell::new(5);
+        {
+            let (mut t, mut b) = cell.borrow_and_transform();
+            let x = *b;
+            let (mut b, _) = b.replace(x as f64);
+            b.release();
+
+            let t = pin::pin!(t.transform(|t| t == 5.0));
+            let t = t.continue_with();
+
+            t.release();
+        }
+        assert_eq!(cell.into_inner(), true);
+    }
+
+    #[test]
+    fn test_with() {
+        let mut cell: SuspCell<bool, _, _, _, _> = SuspCell::new_with(5, |i: f32| i as f64);
+        {
+            let (mut t, mut b) = cell.borrow_and_transform();
+            let x = *b;
+            let (mut b, _) = b.replace(x as f32);
+            b.release();
+
+            defer! { t: bool = t == 5.0; }
+            t.release();
+        }
+
+        assert_eq!(cell.into_inner(), true);
+    }
+
+    #[test]
+    fn test_with_inference() {
+        let mut cell = SuspCell::new_with(5, |i: f32| i as f64);
+        {
+            let (mut t, mut b) = cell.borrow_and_transform();
+            let x = *b;
+            let (mut b, _) = b.replace(x as f32);
+            b.release();
+
+            defer! { t = t == 5.0; }
+            t.release();
+        }
+
+        assert_eq!(cell.into_inner(), true);
     }
 }

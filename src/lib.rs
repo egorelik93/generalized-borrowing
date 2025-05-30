@@ -4,6 +4,7 @@
 #![cfg_attr(feature = "nightly", feature(unsized_locals))]
 #![cfg_attr(feature = "nightly", feature(unsized_fn_params))]
 #![cfg_attr(feature = "nightly", feature(specialization))]
+#![cfg_attr(feature = "nightly", feature(super_let))]
 
 use std::mem::ManuallyDrop;
 
