@@ -31,38 +31,66 @@ pub struct SuspCellTransformShared<'l, S, T, B, F>(UnsafeCell<SuspCellTransform<
 
 #[macro_export]
 macro_rules! borrow_and_transform {
-    (mut $label:ident = $val:expr; defer $body:expr) => { paste! {
-        let $label = SuspCell::new_with(val, |$label| $body);
-        let ([<__transformer_ $label>], borrow) = __cell_$label.borrow_and_transform();
-        borrow
-    }};
+    (mut $label:ident = $val:expr; defer $body:expr) => {
+        paste! {
+            let $label = SuspCell::new_with(val, |$label| $body);
+            let ([<__transformer_ $label>], borrow) = __cell_$label.borrow_and_transform();
+            borrow
+        }
+    };
 
-    (mut $label:ident = $val:expr) => { paste! {
-        let $label = SuspCell::new(val);
-        let ([<__transformer_ $label>], borrow) = __cell_$label.borrow_and_transform();
-        borrow
-    }};
+    (mut $label:ident = $val:expr) => {
+        paste! {{
+            let $label = SuspCell::new($val);
+            let ([<__transformer_ $label>], borrow) = $label.borrow_and_transform();
+            borrow
+        }}
+    };
+}
+
+#[macro_export]
+macro_rules! let_borrow_and_transform {
+    ($borrow:ident = &mut ($cell:ident = $val:expr);) => {
+        paste! {
+            let mut $cell = SuspCell::new($val);
+            let (mut [<__transformer_ $cell>], mut $borrow) = $cell.borrow_and_transform();
+        }
+    };
 }
 
 #[macro_export]
 macro_rules! into_inner {
-    ($label:ident) => { paste! {
-        [<__transformer_$label>].release();
-        $label.into_inner()
-    }};
+    ($cell:ident) => {
+        paste! {{
+            [<__transformer_ $cell>].release();
+            $cell.into_inner()
+        }}
+    };
+}
+
+#[macro_export]
+macro_rules! release {
+    ($cell:ident) => {
+        paste! {
+            [<__transformer_ $cell>].release();
+            let $cell = $cell.into_inner();
+        }
+    };
 }
 
 #[macro_export]
 macro_rules! defer {
-    ($label:ident = $body:expr;) => { paste! {
-        let [<__transformer_$label>] = continue_with!(__transformer_$label, |$label| $body);
-    }};
+    ($cell:ident: $t:ty = $body:expr;) => {
+        paste! {
+            let [<__transformer_ $cell>] = continue_with!([<__transformer_ $cell>], |$cell: $t| $body);
+        }
+    };
 }
 
 #[macro_export]
 macro_rules! continue_with {
     ($transformer:expr, $func:expr) => {
-        std::pin::pin!(transformer.transform(func)).continue_with()
+        std::pin::pin!($transformer.transform($func)).continue_with()
     };
 }
 
@@ -70,7 +98,7 @@ struct SuspCellShared<S, T, B, F>(UnsafeCell<SuspCellInner<S, T, B, F>>);
 
 struct SuspCellInner<S, T, B, F> {
     target: Result<S, State>,
-    transform: UnsafeCell<SuspCellInitialTransform<S, T, B, F>>
+    transform: UnsafeCell<SuspCellInitialTransform<S, T, B, F>>,
 }
 
 #[derive(Clone, Copy, Eq, Debug, Hash, PartialEq)]
@@ -80,7 +108,9 @@ enum State {
 }
 
 trait DynSuspCellInner<'l, S> {
-    fn get_transform_mut<'m>(&'m mut self) -> &'m mut dyn DynSuspCellTransform<'l, S> where 'l: 'm;
+    fn get_transform_mut<'m>(&'m mut self) -> &'m mut dyn DynSuspCellTransform<'l, S>
+    where
+        'l: 'm;
     fn get_target_mut(&mut self) -> &mut Result<S, State>;
 }
 
@@ -139,8 +169,7 @@ trait DynTypedSuspCellTransform<'l, S, T, B, F>: DynSuspCellTransform<'l, S> {
     fn f_mut(&mut self) -> &mut Option<F>;
 }
 
-impl<S, A, B> SuspCell<A, B, S>
-{
+impl<S, A, B> SuspCell<A, B, S> {
     pub fn new(a: A) -> Self {
         SuspCell {
             val: MaybeUninit::new(Typestate {
@@ -156,7 +185,7 @@ impl<S, A, B> SuspCell<A, B, S>
 
 impl<F, S, T, A, B> SuspCell<A, B, S, T, F>
 where
-    F: FnOnce(B) -> T
+    F: FnOnce(B) -> T,
 {
     pub fn new_with(a: A, f: F) -> Self {
         SuspCell {
@@ -174,7 +203,7 @@ where
 #[allow(private_bounds)]
 impl<F, S, A, B> SuspCell<A, B, S, S, F>
 where
-    F: Continuation<B, S>
+    F: Continuation<B, S>,
 {
     pub fn borrow_mut<'l>(&'l mut self) -> SuspCellRef<'l, A, B> {
         assert!(
@@ -198,7 +227,7 @@ where
 #[allow(private_bounds)]
 impl<F, S, T, A, B> SuspCell<A, B, S, T, F>
 where
-    F: Continuation<B, T>
+    F: Continuation<B, T>,
 {
     pub fn borrow_and_transform<'l>(
         &'l mut self,
@@ -291,7 +320,7 @@ where
 
                 if !prev.next_is_boxed() {
                     let mut b = n.move_to_box();
-                    b.set_prev(Some(NonNull::from_mut(prev)));
+                    b.set_prev(Some(unsafe { NonNull::new_unchecked(prev) }));
                     let mut b_raw = unsafe { NonNull::new_unchecked(Box::into_raw(b)) };
                     prev.set_next(Some(b_raw));
                     prev.set_next_is_boxed(true);
@@ -329,7 +358,7 @@ where
 
             let boxed = Box::new(transform);
             unsafe {
-                Pin::new_unchecked(Box::leak(boxed) as &SuspCellTransformShared<'l, S, U, T, G>)
+                Pin::new_unchecked(Box::leak(boxed) as &mut SuspCellTransformShared<'l, S, U, T, G>)
             }
             .continue_with()
         }
@@ -361,8 +390,9 @@ where
             boxed: false,
             next_is_boxed: false,
             next: None,
-            prev: unsafe { self.get_prev_mut().map(|p|
-                NonNull::new_unchecked(p as *mut dyn DynSuspCellTransform<'l, S>))
+            prev: unsafe {
+                self.get_prev_mut()
+                    .map(|p| NonNull::new_unchecked(p as *mut dyn DynSuspCellTransform<'l, S>))
             },
             result,
             f,
@@ -373,10 +403,12 @@ where
 }
 
 impl<'l, 'm, S, T, B, F> SuspCellTransformer<'m, 'l, S, T, B, F> {
-    unsafe fn get_prev_mut(&self) -> Option<&mut (dyn DynTypedSuspCellTransform<'l, S, T, B, F> + 'l)> {
+    unsafe fn get_prev_mut(
+        &self,
+    ) -> Option<&mut (dyn DynTypedSuspCellTransform<'l, S, T, B, F> + 'l)> {
         match self.prev {
-            Some(p) => unsafe { Some(&mut *p.get()) }
-            None => None
+            Some(p) => unsafe { Some(&mut *p.get()) },
+            None => None,
         }
     }
 }
@@ -388,7 +420,7 @@ where
     T: 'l,
     B: 'l,
 {
-    fn continue_with<'m>(self: Pin<&'m Self>) -> SuspCellTransformer<'m, 'l, S, T, B, F> {
+    fn continue_with<'m>(self: Pin<&'m mut Self>) -> SuspCellTransformer<'m, 'l, S, T, B, F> {
         let ptr: &'l mut _ = unsafe { &mut *self.0.get() };
         let start = ptr.start;
 
@@ -401,13 +433,13 @@ where
         } else {
             let prev = unsafe { ptr.prev.unwrap().as_mut() };
             prev.set_next_is_boxed(ptr.boxed);
-            prev.set_next(Some(NonNull::from_mut(
-                ptr as &'l mut (dyn DynSuspCellTransform<'l, S> + 'l),
-            )));
+            prev.set_next(Some(unsafe {
+                NonNull::new_unchecked(ptr as &'l mut (dyn DynSuspCellTransform<'l, S> + 'l))
+            }));
 
             SuspCellTransformer {
                 start,
-                prev: Some(unsafe{ &Pin::into_inner_unchecked(self).0 }),
+                prev: Some(unsafe { &Pin::into_inner_unchecked(self).0 }),
                 result: Err(State::Unfilled),
             }
         }
@@ -419,7 +451,7 @@ where
     F: Continuation<B, T> + 'l,
     S: 'l,
     T: 'l,
-    B: 'l
+    B: 'l,
 {
     fn initial(f: F) -> Self {
         SuspCellInitialTransform {
@@ -497,7 +529,9 @@ where
             return None;
         };
 
-        unsafe { next.transform(src); }
+        unsafe {
+            next.transform(src);
+        }
         transform.release_result();
 
         transform = next;
@@ -515,7 +549,10 @@ where
     T: 'l,
     B: 'l,
 {
-    fn get_transform_mut<'m>(&'m mut self) -> &'m mut dyn DynSuspCellTransform<'l, S> where 'l: 'm {
+    fn get_transform_mut<'m>(&'m mut self) -> &'m mut dyn DynSuspCellTransform<'l, S>
+    where
+        'l: 'm,
+    {
         self.transform.get_mut()
     }
 
@@ -563,7 +600,9 @@ where
     }
 
     fn release_result(&mut self) {
-        unsafe { ptr::write(&mut self.result, Err(State::Released)); }
+        unsafe {
+            ptr::write(&mut self.result, Err(State::Released));
+        }
     }
 
     fn needs_more(&self) -> bool {
@@ -659,7 +698,9 @@ where
     }
 
     fn release_result(&mut self) {
-        unsafe { ptr::write(&mut self.result, Err(State::Released)); }
+        unsafe {
+            ptr::write(&mut self.result, Err(State::Released));
+        }
     }
 
     fn needs_more(&self) -> bool {
@@ -679,7 +720,8 @@ where
     }
 }
 
-impl<'l, S, T, B, F> DynTypedSuspCellTransform<'l, S, T, B, F> for SuspCellInitialTransform<S, T, B, F>
+impl<'l, S, T, B, F> DynTypedSuspCellTransform<'l, S, T, B, F>
+    for SuspCellInitialTransform<S, T, B, F>
 where
     F: Continuation<B, T> + 'l,
     S: 'l,
@@ -709,23 +751,24 @@ where
 
 impl<'l, S, T, B, F> Drop for SuspCellTransform<'l, S, T, B, F> {
     fn drop(&mut self) {
-        if self.next_is_boxed
-            && let Some(next) = self.next
-        {
-            let next = unsafe { Box::from_raw(next.as_ptr()) };
-            mem::drop(next)
+        if self.next_is_boxed {
+            if let Some(next) = self.next {
+                let next = unsafe { Box::from_raw(next.as_ptr()) };
+                mem::drop(next)
+            }
         }
     }
 }
 
 impl<S, T, B, F> Drop for SuspCellInitialTransform<S, T, B, F> {
     fn drop<'l>(&'l mut self) {
-        if self.next_is_boxed
-            && let Some(next) = self.next
-        {
-            let ptr: *mut (dyn DynSuspCellTransform<'l, S> + 'l) = unsafe { mem::transmute(next.as_ptr()) };
-            let next = unsafe { Box::from_raw(ptr) };
-            mem::drop(next)
+        if self.next_is_boxed {
+            if let Some(next) = self.next {
+                let ptr: *mut (dyn DynSuspCellTransform<'l, S> + 'l) =
+                    unsafe { mem::transmute(next.as_ptr()) };
+                let next = unsafe { Box::from_raw(ptr) };
+                mem::drop(next)
+            }
         }
     }
 }
@@ -758,7 +801,6 @@ fn take_result<T>(result: &mut Result<T, State>) -> Option<T> {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use crate::Mutate;
 
@@ -778,9 +820,29 @@ mod tests {
 
     #[test]
     fn test_macros() {
-        let b = borrow_and_transform! { mut cell = 23 };
-        defer! { cell = cell * 2; }
-        let x = into_inner!(cell);
+        use paste::paste;
+
+        let_borrow_and_transform!{ b = &mut (cell = 23); }
+
+        //let b = borrow_and_transform! { mut cell = 23 };
+        defer! { cell: i32 = cell * 2; }
+        //let x = into_inner!(cell);
+        release!(cell);
+    }
+
+    #[test]
+    fn test_macros_expanded() {
+        let mut cell = SuspCell::new(23);
+        let (__transformer_cell, b) = cell.borrow_and_transform();
+        let __transformer_cell =
+            std::pin::pin!(__transformer_cell.transform(|cell:i32| cell * 2))
+        .continue_with();
+
+        b.release();
+        let x = {
+            __transformer_cell.release();
+            cell.into_inner()
+        };
     }
 
     #[test]
