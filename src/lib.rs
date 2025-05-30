@@ -11,11 +11,13 @@ pub mod mutate;
 pub mod mutref;
 mod pinned;
 pub mod inout;
+mod susp;
 
 pub use mutate::{Mutate, AMutate, AMut, Is};
-pub use inout::{Input, Output};
+pub use inout::{Input, Output, InOut, InBox, OutFn};
 pub use mutref::{Mut, In, Out, MutateCell};
 pub use pinned::PinnedCell;
+pub use susp::{SuspCell, SuspCellRef, SuspCellTransformer};
 
 union Typestate<A, B> {
     current: ManuallyDrop<A>,

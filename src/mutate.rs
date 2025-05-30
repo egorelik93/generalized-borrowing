@@ -3,8 +3,8 @@ use std::{marker::PhantomData, mem::{self, ManuallyDrop, MaybeUninit}, ops::{Der
 /// Trait representing references that currently contain
 /// one type but expect another before being dropped.
 ///
-/// A Drop implementation is required that ensures that the
-/// referenced cell is poisoned if it cannot be filled with
+/// The type is required, presumably with a Drop implementation,
+/// to ensure that the referenced cell is poisoned if it cannot be filled with
 /// the requested type. The current `A` value must also be arranged
 /// to be dropped, whether at this time or when the referenced cell gets dropped.
 /// If the implementer has a means of determining that
@@ -35,7 +35,7 @@ use std::{marker::PhantomData, mem::{self, ManuallyDrop, MaybeUninit}, ops::{Der
 ///   finishes.
 ///
 /// Users who want (2) for unsized `B` should use `InOut<A, B>` instead.
-pub trait Mutate<A, B = A>: Deref<Target = A> + DerefMut + Drop where A: ?Sized, B: ?Sized {
+pub trait Mutate<A, B = A>: Deref<Target = A> + DerefMut where A: ?Sized, B: ?Sized {
     type Ref<'l, S>: Mutate<S, B, Err = Self::Err> where Self: 'l, S: 'l;
     type Err;
 
@@ -152,7 +152,7 @@ impl<'l, A, B, M> Drop for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l, A: Is<B
     fn drop(&mut self) {
         unsafe {
             let m = ManuallyDrop::take(&mut self.mutate);
-            m.release();
+            let _ = m.release();
         }
     }
 }
@@ -202,6 +202,7 @@ impl<'l, A, B, M> AMutate<A, B> for AMut<'l, M, A, B> where M: Mutate<A, B> + 'l
 /// Trait that determines whether a type is itself.
 ///
 /// Do not add additional impls.
+#[allow(private_bounds)]
 pub trait Is<T: ?Sized>: private::Private<T> {
     fn id(self) -> T where T: Sized;
     fn id_ref(&self) -> &T;

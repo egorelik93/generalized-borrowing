@@ -19,9 +19,9 @@ pub trait InBox<A: ?Sized> {
 
     fn forget_and_release(src: Self) where Self: Sized;
 
-    fn take(self) -> A where Self: Sized, A: Sized {
-        let a = unsafe { ptr::read(Self::deref(&self)) };
-        Self::forget_and_release(self);
+    fn take(src: Self) -> A where Self: Sized, A: Sized {
+        let a = unsafe { ptr::read(Self::deref(&src)) };
+        Self::forget_and_release(src);
         a
     }
 
@@ -31,7 +31,10 @@ pub trait InBox<A: ?Sized> {
 }
 
 /// Semantically, the core portion of `Output<B>`.
-pub trait OutFn<B: ?Sized>: Drop {
+///
+/// The type is required, presumably with a Drop implementation,
+/// to ensure that the receiving end is poisoned if this function is never called.
+pub trait OutFn<B: ?Sized> {
     type Err;
 
     fn release_from(self, from: impl InBox<B>) -> Result<(), Self::Err>;
@@ -50,7 +53,6 @@ impl<T: ?Sized> InBox<T> for T {
         mem::forget(src)
     }
 }
-
 
 /// In the original formulation, equivalent to `Mutate<A, ()>`.
 ///
@@ -77,7 +79,7 @@ impl<M, A> Drop for DisposableInput<M, A> where M: Mutate<A, ()> , A: ?Sized {
     fn drop(&mut self) {
         unsafe {
             let m = ManuallyDrop::take(&mut self.mutate);
-            m.set_and_release(());
+            let _ = m.set_and_release(());
         }
     }
 }
@@ -124,7 +126,7 @@ impl<M, A> InBox<A> for DisposableInput<M, A> where M: Mutate<A, ()>, A: ?Sized 
     }
 
     fn forget_and_release(src: Self) where Self: Sized {
-        src.write(()).release();
+        let _ = src.write(()).release();
     }
 }
 
@@ -141,7 +143,7 @@ impl<B, M> OutFn<B> for M where M: Mutate<(), B> {
     type Err = M::Err;
 
     fn release_from(self, from: impl InBox<B>) -> Result<(), M::Err>{
-        let b = from.take();
+        let b = InBox::take(from);
         <M as Mutate<(), B>>::set_and_release(self, b)
     }
 }
@@ -153,7 +155,7 @@ impl<B, M> Output<B> for M where M: Mutate<(), B> {}
 ///
 /// In the original formulation, all Mutate have this property.
 /// In Rust, for all sized `B` they still do.
-trait InOut<A: ?Sized, B: ?Sized>: Mutate<A, B> {
+pub trait InOut<A: ?Sized, B: ?Sized>: Mutate<A, B> {
     type RefIO<'l, S>: InOut<S, B> where Self: 'l, S: 'l;
 
     /// Ensures that M::Ref implements InOut.

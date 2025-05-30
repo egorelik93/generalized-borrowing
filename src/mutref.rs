@@ -17,14 +17,23 @@ const fn size_of_union<A, B>() -> usize {
 
 pub struct Mut<'a, A, B = A> {
     val: &'a mut A,
-    write: &'a mut dyn InternalOutFn<B>
+    // For pinned, we can use &'a mut, but in order to satisfy Rust's
+    // aliasing rules in Susp, we cannot store an &'a mut.
+    write: *mut (dyn InternalOutFn<B> + 'a)
 }
 
 impl<'l, A, B> Mut<'l, A, B> {
     pub(crate) unsafe fn from_parts<F>(val: &'l mut Typestate<A, B>, write: &'l mut F) -> Self where F: InternalOutFn<B> {
         Mut {
             val: unsafe { mem::transmute(val) },
-            write: write as &mut dyn InternalOutFn<B>
+            write: write as *mut (dyn InternalOutFn<B> + 'l)
+        }
+    }
+
+    pub(crate) unsafe fn from_raw_parts<F>(val: &'l mut Typestate<A, B>, write: *mut F) -> Self where F: InternalOutFn<B> {
+        Mut {
+            val: unsafe { mem::transmute(val) },
+            write: write as *mut (dyn InternalOutFn<B> + 'l)
         }
     }
 }
@@ -33,8 +42,8 @@ impl<A, B> Drop for Mut<'_, A, B> {
     fn drop(&mut self) {
         unsafe {
             ptr::drop_in_place(self.val);
+            (&mut *self.write).write(OutFnInput::Unfilled);
         }
-        self.write.write(OutFnInput::Unfilled);
     }
 }
 
@@ -42,17 +51,13 @@ impl<A, B> Deref for Mut<'_, A, B> {
     type Target = A;
 
     fn deref(&self) -> &A {
-        unsafe {
-            &self.val
-        }
+        &self.val
     }
 }
 
 impl<A, B> DerefMut for Mut<'_, A, B> {
     fn deref_mut(&mut self) -> &mut A {
-        unsafe {
-            &mut self.val
-        }
+        &mut self.val
     }
 }
 
@@ -67,15 +72,15 @@ impl<'l, A, B> Mutate<A, B> for Mut<'l, A, B> {
         }
 
         let transmuted: Mut<MaybeUninit<C>, B> = unsafe { mem::transmute(self) };
-        mem::replace(transmuted.val, MaybeUninit::new(src));
+        *transmuted.val = MaybeUninit::new(src);
         unsafe { mem::transmute(transmuted) }
     }
 
-    fn release(mut self) -> Result<(), Infallible> where A: Is<B> {
+    fn release(self) -> Result<(), Infallible> where A: Is<B> {
         unsafe {
             let a = &mut *self.val;
             let b = a.id_mut();
-            self.write.write(OutFnInput::Write(b));
+            (&mut *self.write).write(OutFnInput::Write(b));
         }
 
         mem::forget(self);
